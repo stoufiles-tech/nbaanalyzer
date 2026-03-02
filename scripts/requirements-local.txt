@@ -1,0 +1,3 @@
+# Requirements for local scripts only (NOT deployed to Railway)
+# Install with: pip install -r scripts/requirements-local.txt
+nba_api>=1.4.0

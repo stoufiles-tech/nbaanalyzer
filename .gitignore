@@ -1,0 +1,12 @@
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+*.db
+!api/nba.db
+.env
+.env.local
+*.egg-info/
+.venv/
+venv/
+.vercel
