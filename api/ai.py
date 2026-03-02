@@ -14,9 +14,11 @@ provided in the user message. Be concise, specific, and cite actual numbers from
 
 
 def _fmt_salary(n: float) -> str:
-    if n >= 1_000_000:
-        return f"${n/1_000_000:.1f}M"
-    return f"${n:,.0f}"
+    abs_n = abs(n)
+    sign = "-" if n < 0 else ""
+    if abs_n >= 1_000_000:
+        return f"{sign}${abs_n/1_000_000:.1f}M"
+    return f"{sign}${abs_n:,.0f}"
 
 
 def build_league_context(teams: list[dict], players: list[dict]) -> str:
@@ -126,26 +128,40 @@ def analyze_trade(
             f"{p['full_name']} ({p.get('position','?')}) | "
             f"Salary: {_fmt_salary(p.get('salary',0))} | "
             f"{p.get('points',0):.1f}pts {p.get('rebounds',0):.1f}reb {p.get('assists',0):.1f}ast | "
-            f"BPM: {p.get('bpm',0):.1f} | VORP: {p.get('vorp',0):.1f} | WS: {p.get('ws',0):.1f}"
+            f"BPM: {p.get('bpm',0):.1f} | VORP: {p.get('vorp',0):.1f} | WS: {p.get('ws',0):.1f} | "
+            f"Value Score: {p.get('value_score',0):.1f} ({p.get('value_classification','unknown').replace('_',' ')})"
         )
 
     players_a_str = "\n".join(player_summary(p) for p in players_out_a) or "None"
     players_b_str = "\n".join(player_summary(p) for p in players_out_b) or "None"
 
-    prompt = f"""Evaluate this proposed NBA trade:
+    val_a_out = sum(p.get("value_score", 0) for p in players_out_a)
+    val_b_out = sum(p.get("value_score", 0) for p in players_out_b)
 
-{team_a['display_name']} ({team_a['wins']}-{team_a['losses']}, Payroll: {_fmt_salary(team_a['total_salary'])}) sends:
-{players_a_str}
+    prompt = f"""Evaluate this proposed NBA trade.
 
-{team_b['display_name']} ({team_b['wins']}-{team_b['losses']}, Payroll: {_fmt_salary(team_b['total_salary'])}) sends:
-{players_b_str}
+TRADE DETAILS:
+{team_a['display_name']} ({team_a['wins']}-{team_a['losses']}, Payroll: {_fmt_salary(team_a['total_salary'])})
+  Sends: {players_a_str}
+  Receives: {players_b_str}
 
-Cap Impact:
-- {team_a['display_name']}: {_fmt_salary(team_a['total_salary'])} → {_fmt_salary(new_total_a)} (delta: {_fmt_salary(new_total_a - team_a['total_salary'])})
-- {team_b['display_name']}: {_fmt_salary(team_b['total_salary'])} → {_fmt_salary(new_total_b)} (delta: {_fmt_salary(new_total_b - team_b['total_salary'])})
+{team_b['display_name']} ({team_b['wins']}-{team_b['losses']}, Payroll: {_fmt_salary(team_b['total_salary'])})
+  Sends: {players_b_str}
+  Receives: {players_a_str}
+
+VALUE COMPARISON:
+- {team_a['display_name']} gives up {val_a_out:.1f} total value score, receives {val_b_out:.1f} (net: {val_b_out - val_a_out:+.1f})
+- {team_b['display_name']} gives up {val_b_out:.1f} total value score, receives {val_a_out:.1f} (net: {val_a_out - val_b_out:+.1f})
+
+CAP IMPACT:
+- {team_a['display_name']}: {_fmt_salary(team_a['total_salary'])} → {_fmt_salary(new_total_a)} ({_fmt_salary(new_total_a - team_a['total_salary'])})
+- {team_b['display_name']}: {_fmt_salary(team_b['total_salary'])} → {_fmt_salary(new_total_b)} ({_fmt_salary(new_total_b - team_b['total_salary'])})
 - Salary Cap: {_fmt_salary(cap.get('salary_cap', 0))} | Luxury Tax: {_fmt_salary(cap.get('luxury_tax_threshold', 0))}
 
-Evaluate this trade for both teams: who wins, cap impact, value analysis, roster fit, and overall verdict."""
+Provide your analysis in exactly this structure:
+1. **{team_a['display_name']} perspective**: What they gain and lose (on-court + cap).
+2. **{team_b['display_name']} perspective**: What they gain and lose (on-court + cap).
+3. **Verdict**: State ONE clear winner (or declare it even) and explain why in 1-2 sentences. Do not contradict the reasoning above."""
 
     message = _client.messages.create(
         model=MODEL,
