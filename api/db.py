@@ -72,12 +72,32 @@ CREATE TABLE IF NOT EXISTS players (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_players_norm_team
     ON players (norm_name, team_abbr);
+
+CREATE TABLE IF NOT EXISTS team_history (
+    team_abbr      TEXT NOT NULL,
+    season         TEXT NOT NULL,
+    wins           INTEGER DEFAULT 0,
+    losses         INTEGER DEFAULT 0,
+    win_pct        REAL DEFAULT 0.0,
+    conf_rank      INTEGER DEFAULT 0,
+    div_rank       INTEGER DEFAULT 0,
+    playoff_wins   INTEGER DEFAULT 0,
+    playoff_losses INTEGER DEFAULT 0,
+    PRIMARY KEY (team_abbr, season)
+);
 """
 
 
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(_SCHEMA)
+        # Migrate existing players table: add cap_hit + salary_source columns
+        cur = conn.execute("PRAGMA table_info(players)")
+        existing_cols = {row[1] for row in cur.fetchall()}
+        if "cap_hit" not in existing_cols:
+            conn.execute("ALTER TABLE players ADD COLUMN cap_hit REAL DEFAULT NULL")
+        if "salary_source" not in existing_cols:
+            conn.execute("ALTER TABLE players ADD COLUMN salary_source TEXT DEFAULT 'bbref'")
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
@@ -98,6 +118,18 @@ def get_player_by_id(player_id: int) -> dict | None:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM players WHERE id = ?", (player_id,)).fetchone()
     return dict(row) if row else None
+
+
+def load_team_history(team_abbr: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if team_abbr:
+            rows = conn.execute(
+                "SELECT * FROM team_history WHERE team_abbr = ? ORDER BY season",
+                (team_abbr,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM team_history ORDER BY team_abbr, season").fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────
@@ -126,14 +158,14 @@ def upsert_players(players: list[dict]) -> None:
             field_goal_pct, three_point_pct, free_throw_pct, tov_per_g,
             salary, salary_year2, salary_year3, salary_year4,
             per, usg_pct, ws, ws_per_48, bpm, obpm, dbpm, vorp, ows, dws,
-            updated_at
+            cap_hit, salary_source, updated_at
         ) VALUES (
             :full_name, :norm_name, :team_abbr, :pos, :age, :games_played, :minutes,
             :points, :rebounds, :assists, :steals, :blocks, :fga, :fta,
             :field_goal_pct, :three_point_pct, :free_throw_pct, :tov_per_g,
             :salary, :salary_year2, :salary_year3, :salary_year4,
             :per, :usg_pct, :ws, :ws_per_48, :bpm, :obpm, :dbpm, :vorp, :ows, :dws,
-            :updated_at
+            :cap_hit, :salary_source, :updated_at
         )
         ON CONFLICT(norm_name, team_abbr) DO UPDATE SET
             full_name       = excluded.full_name,
@@ -170,7 +202,9 @@ def upsert_players(players: list[dict]) -> None:
     """
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        conn.executemany(sql, [{**p, "updated_at": now} for p in players])
+        conn.executemany(sql, [{
+            "cap_hit": None, "salary_source": "bbref", **p, "updated_at": now,
+        } for p in players])
 
 
 def update_player_salary(player_id: int, salary: float,
@@ -196,6 +230,37 @@ def update_player_salary(player_id: int, salary: float,
         return cur.rowcount > 0
 
 
+def upsert_team_history(records: list[dict]) -> None:
+    sql = """
+        INSERT INTO team_history (team_abbr, season, wins, losses, win_pct,
+                                  conf_rank, div_rank, playoff_wins, playoff_losses)
+        VALUES (:team_abbr, :season, :wins, :losses, :win_pct,
+                :conf_rank, :div_rank, :playoff_wins, :playoff_losses)
+        ON CONFLICT(team_abbr, season) DO UPDATE SET
+            wins           = excluded.wins,
+            losses         = excluded.losses,
+            win_pct        = excluded.win_pct,
+            conf_rank      = excluded.conf_rank,
+            div_rank       = excluded.div_rank,
+            playoff_wins   = excluded.playoff_wins,
+            playoff_losses = excluded.playoff_losses
+    """
+    with get_conn() as conn:
+        conn.executemany(sql, records)
+
+
+def update_player_cap_hit(player_id: int, cap_hit: float | None) -> bool:
+    """Set a manual cap-hit override for a player. Pass None to clear."""
+    now = datetime.utcnow().isoformat()
+    source = "manual" if cap_hit is not None else "bbref"
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE players SET cap_hit = ?, salary_source = ?, updated_at = ? WHERE id = ?",
+            (cap_hit, source, now, player_id),
+        )
+        return cur.rowcount > 0
+
+
 def delete_player(player_id: int) -> bool:
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
@@ -211,6 +276,7 @@ def insert_player(player: dict) -> int:
         "fta", "field_goal_pct", "three_point_pct", "free_throw_pct", "tov_per_g",
         "salary", "salary_year2", "salary_year3", "salary_year4",
         "per", "usg_pct", "ws", "ws_per_48", "bpm", "obpm", "dbpm", "vorp", "ows", "dws",
+        "cap_hit", "salary_source",
     ]
     cols = ", ".join(keys) + ", updated_at"
     vals = ", ".join(f":{k}" for k in keys) + ", :updated_at"
@@ -218,6 +284,8 @@ def insert_player(player: dict) -> int:
     row["full_name"] = player["full_name"]
     row["norm_name"] = player.get("norm_name", player["full_name"].lower().strip())
     row["team_abbr"] = player["team_abbr"]
+    row["cap_hit"] = player.get("cap_hit", None)
+    row["salary_source"] = player.get("salary_source", "bbref")
     row["updated_at"] = now
     with get_conn() as conn:
         cur = conn.execute(f"INSERT INTO players ({cols}) VALUES ({vals})", row)

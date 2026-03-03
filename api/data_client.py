@@ -91,6 +91,22 @@ ESPN_ID = {
     "SAC": "23", "SAS": "24", "TOR": "28", "UTA": "26", "WAS": "27",
 }
 
+ESPN_ID_TO_ABBR = {v: k for k, v in ESPN_ID.items()}
+
+# nba.com team IDs used by nba_api
+NBA_TEAM_ID = {
+    "ATL": 1610612737, "BOS": 1610612738, "BKN": 1610612751, "CHA": 1610612766,
+    "CHI": 1610612741, "CLE": 1610612739, "DAL": 1610612742, "DEN": 1610612743,
+    "DET": 1610612765, "GSW": 1610612744, "HOU": 1610612745, "IND": 1610612754,
+    "LAC": 1610612746, "LAL": 1610612747, "MEM": 1610612763, "MIA": 1610612748,
+    "MIL": 1610612749, "MIN": 1610612750, "NOP": 1610612740, "NYK": 1610612752,
+    "OKC": 1610612760, "ORL": 1610612753, "PHI": 1610612755, "PHX": 1610612756,
+    "POR": 1610612757, "SAC": 1610612758, "SAS": 1610612759, "TOR": 1610612761,
+    "UTA": 1610612762, "WAS": 1610612764,
+}
+
+NBA_TEAM_ID_TO_ABBR = {v: k for k, v in NBA_TEAM_ID.items()}
+
 BBREF_NAME_TO_ABBR = {
     "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",
     "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
@@ -350,6 +366,8 @@ def _load_from_db(_db) -> tuple[list[dict], list[dict], list[dict], dict[str, di
             "three_point_pct": p.get("three_point_pct", 0),
             "free_throw_pct":  p.get("free_throw_pct", 0),
             "tov_per_g":       p.get("tov_per_g", 0),
+            "cap_hit":         p.get("cap_hit"),
+            "salary_source":   p.get("salary_source", "bbref"),
         })
 
     # Build contracts list (same shape as _fetch_bbref_contracts_sync)
@@ -433,6 +451,8 @@ def merge_player_data(
             "salary_year2":    contract["salary_year2"],
             "salary_year3":    contract["salary_year3"],
             "salary_year4":    contract["salary_year4"],
+            "cap_hit":         None,
+            "salary_source":   "bbref",
             **_adv_for(norm),
         }
 
@@ -479,4 +499,15 @@ def get_cap_constants() -> dict:
         "luxury_tax_threshold": LUXURY_TAX_THRESHOLD,
         "first_apron":          FIRST_APRON,
         "second_apron":         SECOND_APRON,
+        "data_quality": {
+            "salary_source": "Basketball-Reference",
+            "salary_type": "base_salary",
+            "known_gaps": [
+                "Salaries are base salary only — not official cap hits.",
+                "Trade bonuses, likely/unlikely incentives, and structured deal adjustments are not reflected.",
+                "Two-way and Exhibit 10 contracts may be missing or approximate.",
+                "Mid-season trades may show stale team assignments until next data refresh.",
+            ],
+            "cap_hit_override_available": True,
+        },
     }

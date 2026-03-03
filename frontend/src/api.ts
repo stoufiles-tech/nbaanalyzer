@@ -2,12 +2,20 @@ import axios from "axios";
 
 const BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
 
+export interface DataQuality {
+  salary_source: string;
+  salary_type: string;
+  known_gaps: string[];
+  cap_hit_override_available: boolean;
+}
+
 export interface CapConstants {
   season: string;
   salary_cap: number;
   luxury_tax_threshold: number;
   first_apron: number;
   second_apron: number;
+  data_quality?: DataQuality;
 }
 
 export interface Player {
@@ -19,6 +27,10 @@ export interface Player {
   salary_year2: number;
   salary_year3: number;
   salary_year4: number;
+  cap_hit: number | null;
+  effective_salary: number;
+  salary_source: string;
+  has_cap_hit_override: boolean;
   age: number;
   points: number;
   rebounds: number;
@@ -85,6 +97,26 @@ export interface Team {
   tax_effective_rate: number;
   is_taxpayer: boolean;
   players?: Player[];
+}
+
+// ── Team History ─────────────────────────────────────────────────────────────
+
+export interface TeamHistorySeason {
+  team_abbr: string;
+  season: string;
+  wins: number;
+  losses: number;
+  win_pct: number;
+  conf_rank: number;
+  div_rank: number;
+  playoff_wins: number;
+  playoff_losses: number;
+}
+
+export interface TeamHistoryResult {
+  team_id: string;
+  abbreviation: string;
+  seasons: TeamHistorySeason[];
 }
 
 // ── Cap Projection (Phase 3) ──────────────────────────────────────────────────
@@ -190,6 +222,9 @@ export const api = {
 
   getTeam: (teamId: string) =>
     axios.get<Team>(`${BASE}/teams/${teamId}`).then((r) => r.data),
+
+  getTeamHistory: (teamId: string) =>
+    axios.get<TeamHistoryResult>(`${BASE}/teams/${teamId}/history`).then((r) => r.data),
 
   getTopValuePlayers: (limit = 20) =>
     axios.get<Player[]>(`${BASE}/players/top-value?limit=${limit}`).then((r) => r.data),

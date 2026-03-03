@@ -57,6 +57,10 @@ async def _refresh() -> list[dict]:
             val_cls  = metrics.classify_player_value(val, salary)
             contract = metrics.get_contract_status(salary, cap["salary_cap"])
 
+            cap_hit_raw = p.get("cap_hit")
+            salary_source = p.get("salary_source", "bbref")
+            has_override = cap_hit_raw is not None and salary_source == "manual"
+
             player = {
                 "espn_id":            p["nba_id"],
                 "full_name":          p["full_name"],
@@ -66,6 +70,10 @@ async def _refresh() -> list[dict]:
                 "salary_year2":       p.get("salary_year2", 0),
                 "salary_year3":       p.get("salary_year3", 0),
                 "salary_year4":       p.get("salary_year4", 0),
+                "cap_hit":            cap_hit_raw,
+                "effective_salary":   cap_hit_raw if has_override else salary,
+                "salary_source":      salary_source,
+                "has_cap_hit_override": has_override,
                 "age":                int(p.get("age") or 0),
                 "points":             pts,
                 "rebounds":           reb,

@@ -5,6 +5,8 @@ import type { CapConstants } from "../api";
 import CapBar from "./CapBar";
 import PlayerTable from "./PlayerTable";
 import CapProjection from "./CapProjection";
+import TeamHistory from "./TeamHistory";
+import DataQualityBanner from "./DataQualityBanner";
 import { fmtSalary, capStatusLabel, capStatusColor } from "../utils";
 import {
   PieChart,
@@ -87,6 +89,7 @@ export default function TeamDetail({ teamId, cap }: Props) {
       )}
 
       {detailTab === "overview" && (<>
+      <DataQualityBanner />
       <div className="team-detail-header">
         {team.logo_url && <img src={team.logo_url} alt={team.abbreviation} className="team-logo-lg" />}
         <div>
@@ -179,6 +182,8 @@ export default function TeamDetail({ teamId, cap }: Props) {
           </ResponsiveContainer>
         </div>
       </div>
+
+      <TeamHistory teamId={teamId} />
 
       <div className="roster-section">
         <h3>Full Roster</h3>

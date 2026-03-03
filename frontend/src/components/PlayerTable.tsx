@@ -138,7 +138,28 @@ export default function PlayerTable({ players }: Props) {
                     {p.value_score.toFixed(2)}
                   </span>
                 </td>
-                {show("contract") && <td>{fmtSalary(p.salary)}</td>}
+                {show("contract") && (
+                  <td>
+                    {fmtSalary(p.salary)}
+                    {p.has_cap_hit_override && (
+                      <span
+                        className="cap-hit-badge"
+                        title={`Cap hit: ${fmtSalary(p.cap_hit ?? 0)}`}
+                        style={{
+                          marginLeft: 4,
+                          fontSize: "0.7rem",
+                          background: "#f59e0b",
+                          color: "#000",
+                          borderRadius: 4,
+                          padding: "1px 4px",
+                          fontWeight: 600,
+                        }}
+                      >
+                        CAP: {fmtSalary(p.cap_hit ?? 0)}
+                      </span>
+                    )}
+                  </td>
+                )}
                 {show("contract") && <td>{p.salary_year2 > 0 ? fmtSalary(p.salary_year2) : "—"}</td>}
                 {show("contract") && <td>{p.salary_year3 > 0 ? fmtSalary(p.salary_year3) : "—"}</td>}
                 {show("contract") && <td>{p.salary_year4 > 0 ? fmtSalary(p.salary_year4) : "—"}</td>}

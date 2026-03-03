@@ -10,7 +10,12 @@ MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = """You are an expert NBA salary cap analyst with deep knowledge of the CBA,
 player evaluation, and roster construction. You have access to real 2025-26 season data
-provided in the user message. Be concise, specific, and cite actual numbers from the data."""
+provided in the user message. Be concise, specific, and cite actual numbers from the data.
+
+IMPORTANT DATA NOTE: All salary figures are BASE SALARY from Basketball-Reference, not
+official cap hits. Actual cap charges may differ due to trade bonuses, likely/unlikely
+incentives, and structured deal adjustments. Factor this caveat into your analysis when
+discussing cap implications."""
 
 
 def _fmt_salary(n: float) -> str:
@@ -157,6 +162,9 @@ CAP IMPACT:
 - {team_a['display_name']}: {_fmt_salary(team_a['total_salary'])} → {_fmt_salary(new_total_a)} ({_fmt_salary(new_total_a - team_a['total_salary'])})
 - {team_b['display_name']}: {_fmt_salary(team_b['total_salary'])} → {_fmt_salary(new_total_b)} ({_fmt_salary(new_total_b - team_b['total_salary'])})
 - Salary Cap: {_fmt_salary(cap.get('salary_cap', 0))} | Luxury Tax: {_fmt_salary(cap.get('luxury_tax_threshold', 0))}
+
+NOTE: Salary figures shown are base salary from Basketball-Reference, not official cap hits.
+Actual cap charges may differ due to trade bonuses, incentives, or structured deals.
 
 Provide your analysis in exactly this structure:
 1. **{team_a['display_name']} perspective**: What they gain and lose (on-court + cap).

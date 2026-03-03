@@ -22,7 +22,7 @@ import data_client
 import db
 
 try:
-    from nba_api.stats.endpoints import leaguedashplayerstats, leaguestandings
+    from nba_api.stats.endpoints import leaguedashplayerstats, leaguestandings, teamyearbyyearstats
 except ImportError:
     print("ERROR: nba_api not installed. Run:  pip install nba_api")
     sys.exit(1)
@@ -180,6 +180,65 @@ def fetch_positions() -> dict:
     return result
 
 
+def fetch_team_histories() -> list[dict]:
+    """Fetch last 10 seasons of W-L records for all 30 teams via nba_api."""
+    print("  [nba_api] Fetching team year-by-year histories ...")
+    current_year = int(SEASON.split("-")[0])
+    min_year = current_year - 10  # last 10 seasons
+
+    records: list[dict] = []
+    for abbr, team_id in data_client.NBA_TEAM_ID.items():
+        try:
+            resp = teamyearbyyearstats.TeamYearByYearStats(
+                team_id=str(team_id),
+                per_mode_simple="Totals",
+                season_type_all_star="Regular Season",
+                timeout=30,
+            )
+            time.sleep(_DELAY)
+            raw = resp.get_dict()
+            result_set = raw["resultSets"][0]
+            headers = [h.lower() for h in result_set["headers"]]
+            rows = [dict(zip(headers, row)) for row in result_set["rowSet"]]
+
+            for r in rows:
+                # season field is like "2024-25"
+                season_str = str(r.get("year", ""))
+                try:
+                    season_year = int(season_str.split("-")[0])
+                except (ValueError, IndexError):
+                    continue
+                if season_year < min_year:
+                    continue
+
+                wins = int(r.get("wins", 0) or 0)
+                losses = int(r.get("losses", 0) or 0)
+                total = wins + losses
+                win_pct = round(wins / total, 3) if total > 0 else 0.0
+                conf_rank = int(r.get("conf_rank", 0) or 0)
+                div_rank = int(r.get("div_rank", 0) or 0)
+                po_wins = int(r.get("po_wins", 0) or 0)
+                po_losses = int(r.get("po_losses", 0) or 0)
+
+                records.append({
+                    "team_abbr": abbr,
+                    "season": season_str,
+                    "wins": wins,
+                    "losses": losses,
+                    "win_pct": win_pct,
+                    "conf_rank": conf_rank,
+                    "div_rank": div_rank,
+                    "playoff_wins": po_wins,
+                    "playoff_losses": po_losses,
+                })
+        except Exception as e:
+            print(f"     WARNING: Failed to fetch history for {abbr}: {e}")
+            continue
+
+    print(f"     -> {len(records)} team_history records")
+    return records
+
+
 def build_player_rows(nba_stats, nba_advanced, bbref_salaries, bbref_advanced, positions) -> list:
     from collections import defaultdict
 
@@ -263,15 +322,20 @@ def main():
     player_rows = build_player_rows(nba_stats, nba_adv, bbref_sal, bbref_adv, positions)
     print(f"  -> {len(player_rows)} players after merge")
 
+    print("\nFetching team histories ...")
+    team_history = fetch_team_histories()
+
     print("\nWriting to database ...")
     db.init_db()
     db.upsert_teams(teams)
     db.upsert_players(player_rows)
+    db.upsert_team_history(team_history)
 
     from datetime import datetime
     print(f"\nDone! {db.DB_PATH}")
-    print(f"  Teams:   {len(teams)}")
-    print(f"  Players: {len(player_rows)}")
+    print(f"  Teams:        {len(teams)}")
+    print(f"  Players:      {len(player_rows)}")
+    print(f"  Team History: {len(team_history)}")
     print(f"  Seeded:  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print("\nNext steps:")
     print("  railway up --service nba-salary-cap-api")

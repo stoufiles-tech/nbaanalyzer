@@ -51,6 +51,16 @@ async def get_team(team_id: str):
     return team
 
 
+@app.get("/api/teams/{team_id}/history")
+async def get_team_history(team_id: str):
+    """Return historical W-L records for a team (by ESPN ID)."""
+    abbr = data_client.ESPN_ID_TO_ABBR.get(team_id)
+    if not abbr:
+        raise HTTPException(404, f"Unknown team id {team_id}")
+    records = db.load_team_history(abbr)
+    return {"team_id": team_id, "abbreviation": abbr, "seasons": records}
+
+
 @app.post("/api/refresh")
 async def refresh():
     await service._refresh()
@@ -336,6 +346,27 @@ async def update_salary(player_id: int, req: SalaryUpdate):
         raise HTTPException(404, f"Player {player_id} not found")
     service._cached_at = None
     return {"message": "Salary updated", "player_id": player_id, "salary": req.salary}
+
+
+class CapHitUpdate(BaseModel):
+    cap_hit: Optional[float] = None
+
+
+@app.patch("/api/db/players/{player_id}/cap-hit")
+async def update_cap_hit(player_id: int, req: CapHitUpdate):
+    """Set or clear a manual cap-hit override for a player."""
+    if not db.db_exists():
+        raise HTTPException(503, "Database not seeded yet.")
+    db.init_db()  # ensure migration columns exist
+    updated = db.update_player_cap_hit(player_id, req.cap_hit)
+    if not updated:
+        raise HTTPException(404, f"Player {player_id} not found")
+    service._cached_at = None
+    return {
+        "message": "Cap hit updated" if req.cap_hit is not None else "Cap hit override cleared",
+        "player_id": player_id,
+        "cap_hit": req.cap_hit,
+    }
 
 
 @app.post("/api/db/players", status_code=201)
