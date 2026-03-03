@@ -252,8 +252,12 @@ def build_player_rows(nba_stats, nba_advanced, bbref_salaries, bbref_advanced, p
     }
 
     rows = []
+    seen_norms: set[str] = set()
+
+    # Pass 1: players with game stats (from nba_api)
     for p in nba_stats:
         norm = p["norm_name"]
+        seen_norms.add(norm)
         sal_entries = sal_by_norm.get(norm, [])
 
         if sal_entries:
@@ -294,6 +298,51 @@ def build_player_rows(nba_stats, nba_advanced, bbref_salaries, bbref_advanced, p
             "salary_year4":    salary_year4,
             "per":             adv_bbref.get("per", 0.0),
             "usg_pct":         adv_nba.get("usg_pct") or adv_bbref.get("usg_pct", 0.0),
+            "ws":              adv_bbref.get("ws", 0.0),
+            "ws_per_48":       adv_bbref.get("ws_per_48", 0.0),
+            "bpm":             adv_bbref.get("bpm", 0.0),
+            "obpm":            adv_bbref.get("obpm", 0.0),
+            "dbpm":            adv_bbref.get("dbpm", 0.0),
+            "vorp":            adv_bbref.get("vorp", 0.0),
+            "ows":             adv_bbref.get("ows", 0.0),
+            "dws":             adv_bbref.get("dws", 0.0),
+        })
+
+    # Pass 2: contract-only players (injured / haven't played — e.g. Haliburton, Tatum)
+    # These have salary data on BBRef but no games in nba_api this season.
+    for sal in bbref_salaries:
+        norm = sal["norm_name"]
+        if norm in seen_norms:
+            continue
+        seen_norms.add(norm)
+
+        adv_bbref = bbref_advanced.get(norm, _ZERO_ADV)
+
+        rows.append({
+            "full_name":       sal["full_name"],
+            "norm_name":       norm,
+            "team_abbr":       sal["team_abbr"],
+            "pos":             positions.get(norm, ""),
+            "age":             0,
+            "games_played":    0,
+            "minutes":         0.0,
+            "points":          0.0,
+            "rebounds":        0.0,
+            "assists":         0.0,
+            "steals":          0.0,
+            "blocks":          0.0,
+            "fga":             0.0,
+            "fta":             0.0,
+            "field_goal_pct":  0.0,
+            "three_point_pct": 0.0,
+            "free_throw_pct":  0.0,
+            "tov_per_g":       0.0,
+            "salary":          sal["salary"],
+            "salary_year2":    sal["salary_year2"],
+            "salary_year3":    sal["salary_year3"],
+            "salary_year4":    sal["salary_year4"],
+            "per":             adv_bbref.get("per", 0.0),
+            "usg_pct":         adv_bbref.get("usg_pct", 0.0),
             "ws":              adv_bbref.get("ws", 0.0),
             "ws_per_48":       adv_bbref.get("ws_per_48", 0.0),
             "bpm":             adv_bbref.get("bpm", 0.0),
