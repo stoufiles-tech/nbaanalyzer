@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import type { Team, TradeResult } from "../api";
+import type { Team, TradeResult, TradePick, DraftPickDetail } from "../api";
 import { fmtSalary } from "../utils";
 
 interface Props {
@@ -13,6 +13,8 @@ export default function TradeAnalyzer({ teams }: Props) {
   const [teamBId, setTeamBId] = useState("");
   const [selectedA, setSelectedA] = useState<Set<string>>(new Set());
   const [selectedB, setSelectedB] = useState<Set<string>>(new Set());
+  const [selectedPicksA, setSelectedPicksA] = useState<Set<string>>(new Set());
+  const [selectedPicksB, setSelectedPicksB] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<TradeResult | null>(null);
   const [error, setError] = useState("");
@@ -27,6 +29,19 @@ export default function TradeAnalyzer({ teams }: Props) {
   const { data: teamBFull, isLoading: loadingB } = useQuery({
     queryKey: ["team", teamBId],
     queryFn: () => api.getTeam(teamBId),
+    enabled: !!teamBId,
+  });
+
+  // Fetch draft picks for each team
+  const { data: picksA } = useQuery({
+    queryKey: ["draft-picks", teamAId],
+    queryFn: () => api.getTeamDraftPicks(teamAId),
+    enabled: !!teamAId,
+  });
+
+  const { data: picksB } = useQuery({
+    queryKey: ["draft-picks", teamBId],
+    queryFn: () => api.getTeamDraftPicks(teamBId),
     enabled: !!teamBId,
   });
 
@@ -45,6 +60,20 @@ export default function TradeAnalyzer({ teams }: Props) {
     setSelected(next);
   };
 
+  const pickKey = (p: DraftPickDetail) => `${p.year}-${p.round}-${p.original_team}`;
+
+  const togglePick = (
+    pick: DraftPickDetail,
+    selected: Set<string>,
+    setSelected: (s: Set<string>) => void
+  ) => {
+    const key = pickKey(pick);
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setSelected(next);
+  };
+
   const salaryOutA = (teamAFull?.players ?? [])
     .filter((p) => selectedA.has(p.full_name))
     .reduce((s, p) => s + p.salary, 0);
@@ -53,12 +82,26 @@ export default function TradeAnalyzer({ teams }: Props) {
     .filter((p) => selectedB.has(p.full_name))
     .reduce((s, p) => s + p.salary, 0);
 
+  const picksValueA = (picksA?.picks ?? [])
+    .filter((p) => selectedPicksA.has(pickKey(p)))
+    .reduce((s, p) => s + p.estimated_value, 0);
+
+  const picksValueB = (picksB?.picks ?? [])
+    .filter((p) => selectedPicksB.has(pickKey(p)))
+    .reduce((s, p) => s + p.estimated_value, 0);
+
   const mismatch =
     salaryOutA > 0 && salaryOutB > 0
       ? Math.abs(salaryOutA - salaryOutB) / Math.max(salaryOutA, salaryOutB)
       : 0;
 
-  const canAnalyze = selectedA.size > 0 && selectedB.size > 0 && !loading;
+  const hasPlayersOrPicks = (players: Set<string>, picks: Set<string>) =>
+    players.size > 0 || picks.size > 0;
+
+  const canAnalyze =
+    hasPlayersOrPicks(selectedA, selectedPicksA) &&
+    hasPlayersOrPicks(selectedB, selectedPicksB) &&
+    !loading;
 
   const analyze = async () => {
     if (!canAnalyze) return;
@@ -66,11 +109,22 @@ export default function TradeAnalyzer({ teams }: Props) {
     setError("");
     setResult(null);
     try {
+      // Build picks arrays from selections
+      const tradePicksA: TradePick[] = (picksA?.picks ?? [])
+        .filter((p) => selectedPicksA.has(pickKey(p)))
+        .map((p) => ({ year: p.year, round: p.round, original_team: p.original_team }));
+
+      const tradePicksB: TradePick[] = (picksB?.picks ?? [])
+        .filter((p) => selectedPicksB.has(pickKey(p)))
+        .map((p) => ({ year: p.year, round: p.round, original_team: p.original_team }));
+
       const data = await api.analyzeTrade({
         team_a_id: teamAId,
         team_b_id: teamBId,
         players_a: Array.from(selectedA),
         players_b: Array.from(selectedB),
+        picks_a: tradePicksA.length > 0 ? tradePicksA : undefined,
+        picks_b: tradePicksB.length > 0 ? tradePicksB : undefined,
       });
       setResult(data);
     } catch {
@@ -86,7 +140,10 @@ export default function TradeAnalyzer({ teams }: Props) {
     teamId: string,
     selected: Set<string>,
     setSelected: (s: Set<string>) => void,
-    label: string
+    label: string,
+    teamPicks: DraftPickDetail[] | undefined,
+    selectedPicks: Set<string>,
+    setSelectedPicks: (s: Set<string>) => void
   ) => {
     if (!teamId) return <div className="trade-roster-empty">Select a team</div>;
     if (isLoading) return <div className="trade-roster-empty">Loading roster...</div>;
@@ -115,14 +172,42 @@ export default function TradeAnalyzer({ teams }: Props) {
             </label>
           ))}
         </div>
+
+        {/* Draft Picks Section */}
+        {teamPicks && teamPicks.length > 0 && (
+          <>
+            <div className="trade-roster-header trade-picks-header">Draft Picks</div>
+            <div className="trade-picks-list">
+              {teamPicks.map((pick) => {
+                const key = pickKey(pick);
+                return (
+                  <label
+                    key={key}
+                    className={`trade-pick-row ${selectedPicks.has(key) ? "selected" : ""}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedPicks.has(key)}
+                      onChange={() => togglePick(pick, selectedPicks, setSelectedPicks)}
+                    />
+                    <span className="trade-pick-label">{pick.label}</span>
+                    <span className="trade-pick-value">~{fmtSalary(pick.estimated_value)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
     );
   };
 
+  const validity = result?.validity;
+
   return (
     <div className="trade-analyzer">
       <h3>Trade Analyzer</h3>
-      <p className="subtitle">Select two teams and players to analyze a potential trade.</p>
+      <p className="subtitle">Select two teams and players/picks to analyze a potential trade.</p>
 
       <div className="trade-team-selectors">
         <div className="trade-team-col">
@@ -132,6 +217,7 @@ export default function TradeAnalyzer({ teams }: Props) {
             onChange={(e) => {
               setTeamAId(e.target.value);
               setSelectedA(new Set());
+              setSelectedPicksA(new Set());
               setResult(null);
             }}
           >
@@ -144,10 +230,19 @@ export default function TradeAnalyzer({ teams }: Props) {
                 </option>
               ))}
           </select>
-          {renderRoster(teamAFull, loadingA, teamAId, selectedA, setSelectedA, "Team A")}
-          {selectedA.size > 0 && (
+          {renderRoster(
+            teamAFull, loadingA, teamAId,
+            selectedA, setSelectedA, "Team A",
+            picksA?.picks, selectedPicksA, setSelectedPicksA
+          )}
+          {(selectedA.size > 0 || selectedPicksA.size > 0) && (
             <div className="trade-salary-summary">
-              Outgoing: <strong>{fmtSalary(salaryOutA)}</strong>
+              {selectedA.size > 0 && <>Outgoing: <strong>{fmtSalary(salaryOutA)}</strong></>}
+              {selectedPicksA.size > 0 && (
+                <span className="trade-picks-summary">
+                  {selectedPicksA.size} pick{selectedPicksA.size > 1 ? "s" : ""} (~{fmtSalary(picksValueA)})
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -161,6 +256,7 @@ export default function TradeAnalyzer({ teams }: Props) {
             onChange={(e) => {
               setTeamBId(e.target.value);
               setSelectedB(new Set());
+              setSelectedPicksB(new Set());
               setResult(null);
             }}
           >
@@ -173,10 +269,19 @@ export default function TradeAnalyzer({ teams }: Props) {
                 </option>
               ))}
           </select>
-          {renderRoster(teamBFull, loadingB, teamBId, selectedB, setSelectedB, "Team B")}
-          {selectedB.size > 0 && (
+          {renderRoster(
+            teamBFull, loadingB, teamBId,
+            selectedB, setSelectedB, "Team B",
+            picksB?.picks, selectedPicksB, setSelectedPicksB
+          )}
+          {(selectedB.size > 0 || selectedPicksB.size > 0) && (
             <div className="trade-salary-summary">
-              Outgoing: <strong>{fmtSalary(salaryOutB)}</strong>
+              {selectedB.size > 0 && <>Outgoing: <strong>{fmtSalary(salaryOutB)}</strong></>}
+              {selectedPicksB.size > 0 && (
+                <span className="trade-picks-summary">
+                  {selectedPicksB.size} pick{selectedPicksB.size > 1 ? "s" : ""} (~{fmtSalary(picksValueB)})
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -196,6 +301,25 @@ export default function TradeAnalyzer({ teams }: Props) {
 
       {result && (
         <div className="trade-result">
+          {/* Validity warnings */}
+          {validity && !validity.is_valid && (
+            <div className="trade-validity-warnings">
+              {!validity.team_a_salary_valid && (
+                <div className="trade-validity-item">
+                  {teamA?.display_name}: {validity.team_a_warnings.join("; ")}
+                </div>
+              )}
+              {!validity.team_b_salary_valid && (
+                <div className="trade-validity-item">
+                  {teamB?.display_name}: {validity.team_b_warnings.join("; ")}
+                </div>
+              )}
+              {validity.ntc_warnings.map((w, i) => (
+                <div key={i} className="trade-validity-item">{w}</div>
+              ))}
+            </div>
+          )}
+
           <h4>Cap Impact</h4>
           <table className="trade-impact-table">
             <thead>
@@ -225,6 +349,25 @@ export default function TradeAnalyzer({ teams }: Props) {
               </tr>
             </tbody>
           </table>
+
+          {/* Draft pick values if present */}
+          {((result.picks_a_value ?? 0) > 0 || (result.picks_b_value ?? 0) > 0) && (
+            <div className="trade-picks-impact">
+              <h4>Draft Capital Impact</h4>
+              <div className="trade-picks-values">
+                {(result.picks_a_value ?? 0) > 0 && (
+                  <div>
+                    {teamA?.display_name} sends ~{fmtSalary(result.picks_a_value!)} in draft value
+                  </div>
+                )}
+                {(result.picks_b_value ?? 0) > 0 && (
+                  <div>
+                    {teamB?.display_name} sends ~{fmtSalary(result.picks_b_value!)} in draft value
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           <h4>AI Analysis</h4>
           <div className="trade-analysis-text">{result.analysis}</div>

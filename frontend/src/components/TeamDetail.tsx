@@ -5,8 +5,8 @@ import type { CapConstants } from "../api";
 import CapBar from "./CapBar";
 import PlayerTable from "./PlayerTable";
 import CapProjection from "./CapProjection";
+import RosterAdvisor from "./RosterAdvisor";
 import TeamHistory from "./TeamHistory";
-import DataQualityBanner from "./DataQualityBanner";
 import { fmtSalary, capStatusLabel, capStatusColor } from "../utils";
 import {
   PieChart,
@@ -24,14 +24,15 @@ import { valueColor } from "../utils";
 interface Props {
   teamId: string;
   cap: CapConstants;
+  onPlayerClick?: (name: string) => void;
 }
 
 const POSITIONS = ["PG", "SG", "SF", "PF", "C"];
 const COLORS = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#6366f1", "#14b8a6"];
 
-type DetailTab = "overview" | "projections";
+type DetailTab = "overview" | "projections" | "advisor";
 
-export default function TeamDetail({ teamId, cap }: Props) {
+export default function TeamDetail({ teamId, cap, onPlayerClick }: Props) {
   const [report, setReport] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
@@ -73,13 +74,13 @@ export default function TeamDetail({ teamId, cap }: Props) {
     <div className="team-detail">
       {/* ── Inner tab bar ── */}
       <div className="detail-tab-bar">
-        {(["overview", "projections"] as DetailTab[]).map((t) => (
+        {(["overview", "projections", "advisor"] as DetailTab[]).map((t) => (
           <button
             key={t}
             className={`detail-tab-btn ${detailTab === t ? "active" : ""}`}
             onClick={() => setDetailTab(t)}
           >
-            {t === "overview" ? "Overview" : "Cap Projections"}
+            {t === "overview" ? "Overview" : t === "projections" ? "Cap Projections" : "Roster Advisor"}
           </button>
         ))}
       </div>
@@ -88,8 +89,11 @@ export default function TeamDetail({ teamId, cap }: Props) {
         <CapProjection teamId={teamId} players={team.players ?? []} />
       )}
 
+      {detailTab === "advisor" && (
+        <RosterAdvisor teamId={teamId} onPlayerClick={onPlayerClick} />
+      )}
+
       {detailTab === "overview" && (<>
-      <DataQualityBanner />
       <div className="team-detail-header">
         {team.logo_url && <img src={team.logo_url} alt={team.abbreviation} className="team-logo-lg" />}
         <div>
@@ -187,7 +191,7 @@ export default function TeamDetail({ teamId, cap }: Props) {
 
       <div className="roster-section">
         <h3>Full Roster</h3>
-        <PlayerTable players={players} />
+        <PlayerTable players={players} onPlayerClick={onPlayerClick} />
       </div>
       </>)} {/* end overview tab */}
     </div>

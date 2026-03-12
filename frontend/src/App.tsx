@@ -1,20 +1,51 @@
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import type { Player } from "./api";
 import TeamCard from "./components/TeamCard";
 import TeamComparison from "./components/TeamComparison";
 import TeamDetail from "./components/TeamDetail";
 import PlayerTable from "./components/PlayerTable";
+import PlayerComparables from "./components/PlayerComparables";
+import PlayerVsPlayer from "./components/PlayerVsPlayer";
+import ExpiringContracts from "./components/ExpiringContracts";
 import AIChat from "./components/AIChat";
 import TradeAnalyzer from "./components/TradeAnalyzer";
 import { fmtSalary } from "./utils";
 
-type Tab = "overview" | "comparison" | "top-value" | "ai";
+type Tab = "overview" | "comparison" | "top-value" | "comparables" | "expiring" | "ai";
+
+const TAB_LABELS: Record<Tab, string> = {
+  overview: "Teams",
+  comparison: "Compare",
+  "top-value": "Top Value",
+  comparables: "Valuations",
+  expiring: "Free Agents",
+  ai: "AI Analyst",
+};
+
+function computePositionAverages(players: Player[]) {
+  const byPos: Record<string, { total: number; count: number }> = {};
+  for (const p of players) {
+    const pos = p.position || "??";
+    if (p.salary <= 0) continue;
+    if (!byPos[pos]) byPos[pos] = { total: 0, count: 0 };
+    byPos[pos].total += p.salary;
+    byPos[pos].count += 1;
+  }
+  return Object.entries(byPos)
+    .filter(([, v]) => v.count >= 3)
+    .map(([pos, v]) => ({ pos, avg: v.total / v.count, count: v.count }))
+    .sort((a, b) => b.avg - a.avg);
+}
+
+type CompareSubTab = "teams" | "players";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("overview");
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
-  const qc = useQueryClient();
+  const [compsPlayer, setCompsPlayer] = useState<string | null>(null);
+  const [compareSubTab, setCompareSubTab] = useState<CompareSubTab>("teams");
 
   const { data: cap, isLoading: capLoading } = useQuery({
     queryKey: ["cap-constants"],
@@ -32,12 +63,15 @@ export default function App() {
     enabled: tab === "top-value",
   });
 
-  const refreshMutation = useMutation({
-    mutationFn: api.refreshData,
-    onSuccess: () => {
-      qc.invalidateQueries();
-    },
-  });
+  const handlePlayerClick = (name: string) => {
+    setCompsPlayer(name);
+    setTab("comparables");
+  };
+
+  const positionBenchmarks = useMemo(
+    () => (topPlayers ? computePositionAverages(topPlayers) : []),
+    [topPlayers]
+  );
 
   const isLoading = capLoading || teamsLoading;
 
@@ -49,28 +83,22 @@ export default function App() {
           {cap && (
             <div className="cap-pill">
               {cap.season} · Cap: {fmtSalary(cap.salary_cap)} · Tax: {fmtSalary(cap.luxury_tax_threshold)}
+              {cap.data_as_of ? ` · Data: ${cap.data_as_of}` : ""}
             </div>
           )}
         </div>
         <div className="header-right">
           <nav className="tab-nav">
-            {(["overview", "comparison", "top-value", "ai"] as Tab[]).map((t) => (
+            {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
               <button
                 key={t}
                 className={`tab-btn ${tab === t ? "active" : ""}`}
                 onClick={() => { setTab(t); setSelectedTeamId(null); }}
               >
-                {t === "overview" ? "Teams" : t === "comparison" ? "Compare" : t === "top-value" ? "Top Value" : "AI Analyst"}
+                {TAB_LABELS[t]}
               </button>
             ))}
           </nav>
-          <button
-            className="refresh-btn"
-            onClick={() => refreshMutation.mutate()}
-            disabled={refreshMutation.isPending}
-          >
-            {refreshMutation.isPending ? "Refreshing..." : "Refresh Data"}
-          </button>
         </div>
       </header>
 
@@ -109,14 +137,39 @@ export default function App() {
                 <button className="back-btn" onClick={() => setSelectedTeamId(null)}>
                   ← Back to Teams
                 </button>
-                <TeamDetail teamId={selectedTeamId} cap={cap} />
+                <TeamDetail teamId={selectedTeamId} cap={cap} onPlayerClick={handlePlayerClick} />
               </div>
             )}
 
             {tab === "comparison" && (
               <div>
-                <h2>Team Comparisons</h2>
-                <TeamComparison teams={teams} cap={cap} />
+                <div className="detail-tab-bar">
+                  <button
+                    className={`detail-tab-btn ${compareSubTab === "teams" ? "active" : ""}`}
+                    onClick={() => setCompareSubTab("teams")}
+                  >
+                    Teams
+                  </button>
+                  <button
+                    className={`detail-tab-btn ${compareSubTab === "players" ? "active" : ""}`}
+                    onClick={() => setCompareSubTab("players")}
+                  >
+                    Players
+                  </button>
+                </div>
+                {compareSubTab === "teams" && (
+                  <>
+                    <h2>Team Comparisons</h2>
+                    <TeamComparison teams={teams} cap={cap} onTeamClick={(id) => { setSelectedTeamId(id); setTab("overview"); }} />
+                  </>
+                )}
+                {compareSubTab === "players" && (
+                  <>
+                    <h2>Head-to-Head Player Comparison</h2>
+                    <p className="subtitle">Pick any two players and compare their stats side-by-side.</p>
+                    <PlayerVsPlayer />
+                  </>
+                )}
               </div>
             )}
 
@@ -126,11 +179,41 @@ export default function App() {
                 <p className="subtitle">
                   Ranked by value score — production per $M of salary. Higher = better value.
                 </p>
+                {positionBenchmarks.length > 0 && (
+                  <div className="benchmark-chips">
+                    <span className="benchmark-label">Avg Salary by Position:</span>
+                    {positionBenchmarks.map((b) => (
+                      <span key={b.pos} className="benchmark-chip">
+                        {b.pos}: {fmtSalary(b.avg)}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {topLoading ? (
                   <div className="loading">Loading top value players...</div>
                 ) : topPlayers ? (
-                  <PlayerTable players={topPlayers} />
+                  <PlayerTable players={topPlayers} onPlayerClick={handlePlayerClick} />
                 ) : null}
+              </div>
+            )}
+
+            {tab === "comparables" && (
+              <div>
+                <h2>Contract Comparables</h2>
+                <p className="subtitle">
+                  Find players with similar production profiles and compare salaries to estimate fair market value.
+                </p>
+                <PlayerComparables initialPlayer={compsPlayer} />
+              </div>
+            )}
+
+            {tab === "expiring" && (
+              <div>
+                <h2>Expiring Contracts & Free Agents</h2>
+                <p className="subtitle">
+                  Players with no guaranteed salary beyond this season — potential free agents or trade targets.
+                </p>
+                <ExpiringContracts onPlayerClick={handlePlayerClick} />
               </div>
             )}
 

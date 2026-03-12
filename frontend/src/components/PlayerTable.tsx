@@ -1,17 +1,38 @@
 import { useState } from "react";
 import type { Player } from "../api";
 import { fmtSalary, fmtPct, valueColor, valueLabel } from "../utils";
+import Tooltip from "./Tooltip";
 
 interface Props {
   players: Player[];
+  onPlayerClick?: (name: string) => void;
 }
+
+const COLUMN_TIPS: Record<string, string> = {
+  "PTS": "Points per game",
+  "REB": "Rebounds per game",
+  "AST": "Assists per game",
+  "TOV": "Turnovers per game",
+  "MIN": "Minutes per game",
+  "TS%": "True Shooting % — accounts for 2PT, 3PT, and FT efficiency",
+  "USG%": "Usage Rate — % of team plays used while on court",
+  "BPM": "Box Plus/Minus — points above average per 100 possessions",
+  "WS": "Win Shares — estimated wins contributed",
+  "VORP": "Value Over Replacement Player",
+  "PER~": "Player Efficiency Rating (estimate)",
+  "Value": "Value Score — production per $1M of salary (higher = better deal)",
+  "Salary (Y1)": "Current season salary (Spotrac cap hit)",
+  "Y2": "Salary in year 2 of contract",
+  "Y3": "Salary in year 3 of contract",
+  "Y4": "Salary in year 4 of contract",
+};
 
 type SortKey = keyof Player;
 type ColGroup = "basic" | "advanced" | "contract";
 
 const POSITIONS = ["PG", "SG", "SF", "PF", "C"];
 
-export default function PlayerTable({ players }: Props) {
+export default function PlayerTable({ players, onPlayerClick }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("value_score");
   const [asc, setAsc] = useState(false);
   const [filter, setFilter] = useState("");
@@ -53,11 +74,19 @@ export default function PlayerTable({ players }: Props) {
       return 0;
     });
 
-  const col = (label: string, key: SortKey) => (
-    <th onClick={() => handleSort(key)} className="sortable-th">
-      {label} {sortKey === key ? (asc ? "▲" : "▼") : ""}
-    </th>
-  );
+  const col = (label: string, key: SortKey) => {
+    const tip = COLUMN_TIPS[label];
+    const content = (
+      <>
+        {label} {sortKey === key ? (asc ? "▲" : "▼") : ""}
+      </>
+    );
+    return (
+      <th onClick={() => handleSort(key)} className="sortable-th">
+        {tip ? <Tooltip text={tip}>{content}</Tooltip> : content}
+      </th>
+    );
+  };
 
   return (
     <div className="player-table-container">
@@ -120,7 +149,15 @@ export default function PlayerTable({ players }: Props) {
           <tbody>
             {sorted.map((p) => (
               <tr key={p.espn_id}>
-                <td className="player-name-cell">{p.full_name}</td>
+                <td className="player-name-cell">
+                  {onPlayerClick ? (
+                    <button className="clickable-name" onClick={() => onPlayerClick(p.full_name)}>
+                      {p.full_name}
+                    </button>
+                  ) : (
+                    p.full_name
+                  )}
+                </td>
                 <td>{p.position || "—"}</td>
                 {show("basic") && <td>{p.points.toFixed(1)}</td>}
                 {show("basic") && <td>{p.rebounds.toFixed(1)}</td>}
@@ -139,26 +176,7 @@ export default function PlayerTable({ players }: Props) {
                   </span>
                 </td>
                 {show("contract") && (
-                  <td>
-                    {fmtSalary(p.salary)}
-                    {p.has_cap_hit_override && (
-                      <span
-                        className="cap-hit-badge"
-                        title={`Cap hit: ${fmtSalary(p.cap_hit ?? 0)}`}
-                        style={{
-                          marginLeft: 4,
-                          fontSize: "0.7rem",
-                          background: "#f59e0b",
-                          color: "#000",
-                          borderRadius: 4,
-                          padding: "1px 4px",
-                          fontWeight: 600,
-                        }}
-                      >
-                        CAP: {fmtSalary(p.cap_hit ?? 0)}
-                      </span>
-                    )}
-                  </td>
+                  <td>{fmtSalary(p.salary)}</td>
                 )}
                 {show("contract") && <td>{p.salary_year2 > 0 ? fmtSalary(p.salary_year2) : "—"}</td>}
                 {show("contract") && <td>{p.salary_year3 > 0 ? fmtSalary(p.salary_year3) : "—"}</td>}

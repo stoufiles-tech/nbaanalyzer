@@ -18,13 +18,15 @@ import { fmtSalary, capStatusColor } from "../utils";
 interface Props {
   teams: Team[];
   cap: CapConstants;
+  onTeamClick?: (espnId: string) => void;
 }
 
-export default function TeamComparison({ teams, cap }: Props) {
+export default function TeamComparison({ teams, cap, onTeamClick }: Props) {
   const sorted = [...teams].sort((a, b) => b.total_salary - a.total_salary);
 
   const scatterData = teams.map((t) => ({
     name: t.abbreviation,
+    espn_id: t.espn_id,
     salary_m: t.total_salary / 1_000_000,
     wins: t.wins,
     fill: capStatusColor(t),
@@ -35,10 +37,17 @@ export default function TeamComparison({ teams, cap }: Props) {
     .slice(0, 15)
     .map((t) => ({
       name: t.abbreviation,
+      espn_id: t.espn_id,
       cap_efficiency: t.cap_efficiency,
       wins_per_dollar: t.wins_per_dollar,
       fill: capStatusColor(t),
     }));
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleBarClick = (data: any) => {
+    const id = data?.espn_id ?? data?.payload?.espn_id;
+    if (id && onTeamClick) onTeamClick(id);
+  };
 
   return (
     <div className="comparison-grid">
@@ -53,7 +62,7 @@ export default function TeamComparison({ teams, cap }: Props) {
             <ReferenceLine y={cap.salary_cap} stroke="#22c55e" strokeDasharray="4 2" label={{ value: "Cap", fill: "#22c55e", fontSize: 11 }} />
             <ReferenceLine y={cap.luxury_tax_threshold} stroke="#f97316" strokeDasharray="4 2" label={{ value: "Tax", fill: "#f97316", fontSize: 11 }} />
             <ReferenceLine y={cap.first_apron} stroke="#ef4444" strokeDasharray="4 2" label={{ value: "Apron", fill: "#ef4444", fontSize: 11 }} />
-            <Bar dataKey="total_salary" radius={[4, 4, 0, 0]}>
+            <Bar dataKey="total_salary" radius={[4, 4, 0, 0]} cursor="pointer" onClick={handleBarClick}>
               {sorted.map((t) => (
                 <Cell key={t.espn_id} fill={capStatusColor(t)} />
               ))}
@@ -93,7 +102,7 @@ export default function TeamComparison({ teams, cap }: Props) {
                 );
               }}
             />
-            <Scatter data={scatterData} fill="#3b82f6">
+            <Scatter data={scatterData} fill="#3b82f6" cursor="pointer" onClick={handleBarClick}>
               {scatterData.map((d, i) => (
                 <Cell key={i} fill={d.fill} />
               ))}
@@ -111,12 +120,12 @@ export default function TeamComparison({ teams, cap }: Props) {
             <YAxis />
             <Tooltip formatter={(v: number) => v.toFixed(4)} />
             <Legend />
-            <Bar dataKey="cap_efficiency" name="Cap Efficiency" radius={[4, 4, 0, 0]}>
+            <Bar dataKey="cap_efficiency" name="Cap Efficiency" radius={[4, 4, 0, 0]} cursor="pointer" onClick={handleBarClick}>
               {effData.map((d, i) => (
                 <Cell key={i} fill={d.fill} />
               ))}
             </Bar>
-            <Bar dataKey="wins_per_dollar" name="Wins/$M" radius={[4, 4, 0, 0]} fill="#818cf8" />
+            <Bar dataKey="wins_per_dollar" name="Wins/$M" radius={[4, 4, 0, 0]} fill="#818cf8" cursor="pointer" onClick={handleBarClick} />
           </BarChart>
         </ResponsiveContainer>
       </div>

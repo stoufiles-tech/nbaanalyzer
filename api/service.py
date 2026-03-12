@@ -1,15 +1,26 @@
 """
-In-memory cache layer (replaces SQLite — works on Vercel serverless).
+In-memory cache layer with background live scraping.
+
+Cold-starts from static JSON, then refreshes every 6h via BBRef scraping.
+On scrape failure: logs error, keeps cached data (graceful degradation).
 """
+import asyncio
+import logging
 from datetime import datetime, timedelta
+
 import data_client
 import metrics
+
+logger = logging.getLogger("service")
 
 CACHE_TTL = timedelta(hours=6)
 
 _teams: list[dict] = []
 _players: list[dict] = []
 _cached_at: datetime | None = None
+_data_source: str = "not_loaded"
+_last_scrape_at: datetime | None = None
+_scrape_lock = asyncio.Lock()
 
 
 def _is_stale() -> bool:
@@ -18,24 +29,19 @@ def _is_stale() -> bool:
     return datetime.utcnow() - _cached_at > CACHE_TTL
 
 
-async def get_all_teams() -> list[dict]:
-    if not _is_stale() and _teams:
-        return _teams
-    return await _refresh()
-
-
-async def _refresh() -> list[dict]:
-    global _teams, _players, _cached_at
-
-    raw_teams, raw_stats, salaries, advanced_stats = await data_client.fetch_all_data()
-    # raw_stats is now dict[int, dict] keyed by player_id
-    players_merged = data_client.merge_player_data(raw_stats, salaries, advanced_stats)
-
+def _build_teams(
+    raw_teams: list[dict],
+    players_merged: list[dict],
+    cap: dict,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Build enriched team + player dicts from raw data.
+    Extracted from _refresh() so it can be reused by the live scraper.
+    """
     by_team: dict[str, list[dict]] = {}
     for p in players_merged:
         by_team.setdefault(p["team_abbr"], []).append(p)
 
-    cap = data_client.get_cap_constants()
     all_players: list[dict] = []
     teams_out: list[dict] = []
 
@@ -57,9 +63,8 @@ async def _refresh() -> list[dict]:
             val_cls  = metrics.classify_player_value(val, salary)
             contract = metrics.get_contract_status(salary, cap["salary_cap"])
 
-            cap_hit_raw = p.get("cap_hit")
-            salary_source = p.get("salary_source", "bbref")
-            has_override = cap_hit_raw is not None and salary_source == "manual"
+            cap_hit = p.get("cap_hit") or salary
+            salary = cap_hit  # use cap_hit as the primary salary figure
 
             player = {
                 "espn_id":            p["nba_id"],
@@ -70,10 +75,10 @@ async def _refresh() -> list[dict]:
                 "salary_year2":       p.get("salary_year2", 0),
                 "salary_year3":       p.get("salary_year3", 0),
                 "salary_year4":       p.get("salary_year4", 0),
-                "cap_hit":            cap_hit_raw,
-                "effective_salary":   cap_hit_raw if has_override else salary,
-                "salary_source":      salary_source,
-                "has_cap_hit_override": has_override,
+                "cap_hit":            cap_hit,
+                "effective_salary":   salary,
+                "salary_source":      "spotrac",
+                "has_cap_hit_override": False,
                 "age":                int(p.get("age") or 0),
                 "points":             pts,
                 "rebounds":           reb,
@@ -131,10 +136,127 @@ async def _refresh() -> list[dict]:
             "players":            team_players,
         })
 
-    _teams = teams_out
-    _players = all_players
+    return teams_out, all_players
+
+
+async def get_all_teams() -> list[dict]:
+    if not _is_stale() and _teams:
+        return _teams
+    return await _refresh()
+
+
+async def _refresh() -> list[dict]:
+    """Cold-start from static JSON."""
+    global _teams, _players, _cached_at, _data_source
+
+    raw_teams, raw_stats, salaries, advanced_stats = await data_client.fetch_all_data()
+    players_merged = data_client.merge_player_data(raw_stats, salaries, advanced_stats)
+    cap = data_client.get_cap_constants()
+
+    _teams, _players = _build_teams(raw_teams, players_merged, cap)
     _cached_at = datetime.utcnow()
+    _data_source = "static JSON (data/nba_2025_26.json)"
     return _teams
+
+
+async def _scrape_and_merge() -> bool:
+    """
+    Run live BBRef scrape and merge into cached data.
+    Returns True on success, False on failure (cached data preserved).
+    """
+    global _teams, _players, _cached_at, _data_source, _last_scrape_at
+
+    async with _scrape_lock:
+        try:
+            import scraper
+            result = await scraper.scrape_all()
+            if result is None:
+                logger.warning("Scrape returned None — keeping cached data")
+                return False
+
+            standings, per_game, advanced, contracts = result
+
+            # Build standings lookup
+            standings_map = {s["abbreviation"]: s for s in standings}
+
+            # Use JSON teams as base, merge scraped standings
+            base_data = data_client._load_json()
+            raw_teams = []
+            for t in base_data["teams"]:
+                abbr = t["abbreviation"]
+                if abbr in standings_map:
+                    t = {**t, "wins": standings_map[abbr]["wins"],
+                         "losses": standings_map[abbr]["losses"]}
+                raw_teams.append(t)
+
+            # Merge scraped stats + contracts
+            players_merged = data_client.merge_player_data(per_game, contracts, advanced)
+            cap = data_client.get_cap_constants()
+
+            _teams, _players = _build_teams(raw_teams, players_merged, cap)
+            _cached_at = datetime.utcnow()
+            _last_scrape_at = datetime.utcnow()
+            _data_source = "live BBRef scrape"
+            logger.info(f"Live scrape merged: {len(_teams)} teams, {len(_players)} players")
+            return True
+
+        except Exception as e:
+            logger.error(f"Scrape-and-merge failed: {e}", exc_info=True)
+            return False
+
+
+async def refresh_live() -> dict:
+    """Manual trigger for live scrape. Returns status dict."""
+    success = await _scrape_and_merge()
+    return {
+        "success": success,
+        "teams": len(_teams),
+        "players": len(_players),
+        "data_source": _data_source,
+        "last_scrape_at": _last_scrape_at.isoformat() if _last_scrape_at else None,
+    }
+
+
+async def start_background_scraper():
+    """
+    Cold-start from JSON, then schedule 6h scrape loop.
+    Called from FastAPI startup event.
+    """
+    # Initial load from JSON
+    await _refresh()
+    logger.info("Initial data loaded from JSON")
+
+    # Start background loop (scrapes immediately, then every 6h)
+    asyncio.create_task(_scrape_loop())
+
+
+async def _scrape_loop():
+    """Background loop: scrape immediately on startup, then every 6 hours."""
+    # First scrape after a short delay (let the server finish starting)
+    await asyncio.sleep(10)
+    logger.info("Initial background scrape starting...")
+    success = await _scrape_and_merge()
+    if success:
+        logger.info("Initial background scrape succeeded")
+    else:
+        logger.warning("Initial background scrape failed — will retry in 6h")
+
+    while True:
+        await asyncio.sleep(CACHE_TTL.total_seconds())
+        logger.info("Background scrape starting...")
+        success = await _scrape_and_merge()
+        if success:
+            logger.info("Background scrape succeeded")
+        else:
+            logger.warning("Background scrape failed — will retry next cycle")
+
+
+def get_data_source() -> str:
+    return _data_source
+
+
+def get_last_scrape_at() -> datetime | None:
+    return _last_scrape_at
 
 
 def get_team_by_id(espn_id: str) -> dict | None:

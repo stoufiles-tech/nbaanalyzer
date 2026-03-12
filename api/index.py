@@ -7,12 +7,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
-from typing import Optional  # noqa: E402
 import service  # noqa: E402
 import data_client  # noqa: E402
 import metrics  # noqa: E402
 import ai  # noqa: E402
-import db  # noqa: E402
+import advisor  # noqa: E402
+import draft  # noqa: E402
 import comparables as comparables_engine  # noqa: E402
 
 app = FastAPI(title="NBA Salary Cap Analyzer", version="1.0.0")
@@ -25,6 +25,11 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def startup():
+    await service.start_background_scraper()
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
@@ -32,7 +37,14 @@ async def health():
 
 @app.get("/api/cap-constants")
 async def cap_constants():
-    return data_client.get_cap_constants()
+    result = data_client.get_cap_constants()
+    # Override data_as_of with live scrape timestamp if available
+    last_scrape = service.get_last_scrape_at()
+    if last_scrape:
+        result["data_as_of"] = last_scrape.strftime("%Y-%m-%d %H:%M UTC")
+    elif service._cached_at:
+        result["data_as_of"] = service._cached_at.strftime("%Y-%m-%d %H:%M UTC")
+    return result
 
 
 @app.get("/api/teams")
@@ -57,8 +69,17 @@ async def get_team_history(team_id: str):
     abbr = data_client.ESPN_ID_TO_ABBR.get(team_id)
     if not abbr:
         raise HTTPException(404, f"Unknown team id {team_id}")
-    records = db.load_team_history(abbr)
-    return {"team_id": team_id, "abbreviation": abbr, "seasons": records}
+    return {"team_id": team_id, "abbreviation": abbr, "seasons": []}
+
+
+@app.get("/api/teams/{team_id}/draft-picks")
+async def get_team_draft_picks(team_id: str):
+    """Return draft pick inventory for a team."""
+    abbr = data_client.ESPN_ID_TO_ABBR.get(team_id)
+    if not abbr:
+        raise HTTPException(404, f"Unknown team id {team_id}")
+    teams = await service.get_all_teams()
+    return draft.get_team_draft_capital_summary(abbr, teams)
 
 
 @app.post("/api/refresh")
@@ -82,6 +103,13 @@ async def get_player_comparables(player_name: str, limit: int = 8):
     return result
 
 
+@app.get("/api/players/all")
+async def all_players():
+    if service._is_stale():
+        await service.get_all_teams()
+    return service._players
+
+
 @app.get("/api/players/top-value")
 async def top_value(limit: int = 100):
     if service._is_stale():
@@ -91,27 +119,22 @@ async def top_value(limit: int = 100):
 
 @app.get("/api/debug")
 async def debug():
-    import asyncio, traceback
-    results = {}
+    if service._is_stale():
+        await service.get_all_teams()
+    last_scrape = service.get_last_scrape_at()
+    return {
+        "data_source": service.get_data_source(),
+        "teams": len(service._teams),
+        "players": len(service._players),
+        "last_scrape_at": last_scrape.isoformat() if last_scrape else None,
+    }
 
-    async def test(name, fn):
-        try:
-            loop = asyncio.get_event_loop()
-            out = await asyncio.wait_for(loop.run_in_executor(None, fn), timeout=90)
-            count = len(out) if isinstance(out, (list, dict)) else "ok"
-            results[name] = f"ok ({count})"
-        except Exception as e:
-            results[name] = f"error: {traceback.format_exc()[-300:]}"
 
-    if db.db_exists():
-        results["db_status"] = "ok (using SQLite DB)"
-        results["db_teams"]   = f"ok ({len(db.load_teams())})"
-        results["db_players"] = f"ok ({len(db.load_players())})"
-    else:
-        await test("standings",     data_client._fetch_bbref_standings_sync)
-        await test("player_stats",  data_client._fetch_bbref_player_stats_sync)
-        await test("advanced_stats",data_client._fetch_bbref_advanced_sync)
-    return results
+@app.post("/api/admin/refresh-live")
+async def admin_refresh_live():
+    """Manual trigger for live BBRef scrape."""
+    result = await service.refresh_live()
+    return result
 
 
 # ── AI endpoints ──────────────────────────────────────────────────────────────
@@ -120,11 +143,19 @@ class ChatRequest(BaseModel):
     question: str
 
 
+class TradePick(BaseModel):
+    year: int
+    round: int
+    original_team: str
+
+
 class TradeRequest(BaseModel):
     team_a_id: str
     team_b_id: str
-    players_a: list[str]  # full_name list
-    players_b: list[str]
+    players_a: list[str] = []  # full_name list
+    players_b: list[str] = []
+    picks_a: list[TradePick] = []  # picks team A sends
+    picks_b: list[TradePick] = []  # picks team B sends
 
 
 @app.post("/api/chat")
@@ -144,6 +175,22 @@ async def team_report(team_id: str):
         raise HTTPException(404, f"Team {team_id} not found")
     report = ai.generate_team_report(team)
     return {"report": report}
+
+
+@app.get("/api/teams/{team_id}/advisor")
+async def team_advisor(team_id: str):
+    teams = await service.get_all_teams()
+    team = service.get_team_by_id(team_id)
+    if not team:
+        raise HTTPException(404, f"Team {team_id} not found")
+    cap = data_client.get_cap_constants()
+    result = advisor.generate_recommendations(team, teams, cap)
+    # AI summary (graceful fallback)
+    try:
+        result["ai_summary"] = ai.generate_advisor_summary(team, result)
+    except Exception:
+        result["ai_summary"] = None
+    return result
 
 
 @app.post("/api/trade")
@@ -166,7 +213,55 @@ async def trade_analysis(req: TradeRequest):
     players_b = find_players(team_b, req.players_b)
     cap = data_client.get_cap_constants()
 
-    result = ai.analyze_trade(team_a, players_a, team_b, players_b, cap)
+    # Resolve draft picks
+    picks_a_resolved = []
+    for tp in req.picks_a:
+        pick_data = {"year": tp.year, "round": tp.round, "original_team": tp.original_team,
+                     "owner": team_a.get("abbreviation", "")}
+        pick_data["label"] = draft.format_pick_label(pick_data)
+        pick_data["estimated_value"] = draft.estimate_pick_value(pick_data, teams)
+        picks_a_resolved.append(pick_data)
+
+    picks_b_resolved = []
+    for tp in req.picks_b:
+        pick_data = {"year": tp.year, "round": tp.round, "original_team": tp.original_team,
+                     "owner": team_b.get("abbreviation", "")}
+        pick_data["label"] = draft.format_pick_label(pick_data)
+        pick_data["estimated_value"] = draft.estimate_pick_value(pick_data, teams)
+        picks_b_resolved.append(pick_data)
+
+    picks_a_value = sum(p["estimated_value"] for p in picks_a_resolved)
+    picks_b_value = sum(p["estimated_value"] for p in picks_b_resolved)
+
+    # Pre-validate salary matching (Layer 1)
+    sal_a_out = sum(p.get("salary", 0) for p in players_a)
+    sal_b_out = sum(p.get("salary", 0) for p in players_b)
+    validity_a = advisor.validate_salary_match(sal_b_out, team_a, cap) if sal_b_out > 0 else {"valid": True, "rule_used": "picks_only", "max_incoming": 0, "warnings": []}
+    validity_b = advisor.validate_salary_match(sal_a_out, team_b, cap) if sal_a_out > 0 else {"valid": True, "rule_used": "picks_only", "max_incoming": 0, "warnings": []}
+
+    # Check NTC
+    ntc_warnings = []
+    for p in players_a + players_b:
+        if p["full_name"] in advisor.NTC_PLAYERS:
+            ntc_warnings.append(f"{p['full_name']} has a {advisor.NTC_PLAYERS[p['full_name']]} no-trade clause")
+
+    result = ai.analyze_trade(
+        team_a, players_a, team_b, players_b, cap,
+        picks_a=picks_a_resolved if picks_a_resolved else None,
+        picks_b=picks_b_resolved if picks_b_resolved else None,
+    )
+    result["picks_a_value"] = picks_a_value
+    result["picks_b_value"] = picks_b_value
+    result["validity"] = {
+        "team_a_salary_valid": validity_a["valid"],
+        "team_a_rule": validity_a["rule_used"],
+        "team_a_warnings": validity_a["warnings"],
+        "team_b_salary_valid": validity_b["valid"],
+        "team_b_rule": validity_b["rule_used"],
+        "team_b_warnings": validity_b["warnings"],
+        "ntc_warnings": ntc_warnings,
+        "is_valid": validity_a["valid"] and validity_b["valid"] and len(ntc_warnings) == 0,
+    }
     return result
 
 
@@ -264,138 +359,3 @@ async def project_team(team_id: str, req: ProjectionRequest):
         "years": years,
     }
 
-
-# ── Salary / DB CRUD endpoints ────────────────────────────────────────────────
-
-class SalaryUpdate(BaseModel):
-    salary: float
-    salary_year2: Optional[float] = None
-    salary_year3: Optional[float] = None
-    salary_year4: Optional[float] = None
-
-
-class PlayerCreate(BaseModel):
-    full_name: str
-    team_abbr: str
-    pos: Optional[str] = ""
-    age: Optional[float] = 0
-    salary: Optional[float] = 0
-    salary_year2: Optional[float] = 0
-    salary_year3: Optional[float] = 0
-    salary_year4: Optional[float] = 0
-
-
-@app.get("/api/db/status")
-async def db_status():
-    """Check whether the SQLite DB exists and how many rows it has."""
-    if not db.db_exists():
-        return {"seeded": False, "db_path": db.DB_PATH}
-    teams   = db.load_teams()
-    players = db.load_players()
-    timestamps = [p.get("updated_at", "") for p in players] + \
-                 [t.get("updated_at", "") for t in teams]
-    last_updated = max((t for t in timestamps if t), default="unknown")
-    return {
-        "seeded":       True,
-        "teams":        len(teams),
-        "players":      len(players),
-        "last_updated": last_updated,
-        "db_path":      db.DB_PATH,
-    }
-
-
-@app.get("/api/db/players")
-async def list_db_players(team: Optional[str] = None, q: Optional[str] = None):
-    """List all players stored in the SQLite DB.
-    Optional filters: ?team=BOS  or  ?q=lebron
-    """
-    if not db.db_exists():
-        raise HTTPException(503, "Database not seeded yet. Run scripts/fetch_and_seed.py locally.")
-    players = db.load_players()
-    if team:
-        players = [p for p in players if p.get("team_abbr", "").upper() == team.upper()]
-    if q:
-        ql = q.lower()
-        players = [p for p in players if ql in p.get("full_name", "").lower()]
-    return players
-
-
-@app.get("/api/db/players/{player_id}")
-async def get_db_player(player_id: int):
-    if not db.db_exists():
-        raise HTTPException(503, "Database not seeded yet.")
-    player = db.get_player_by_id(player_id)
-    if not player:
-        raise HTTPException(404, f"Player {player_id} not found")
-    return player
-
-
-@app.patch("/api/db/players/{player_id}/salary")
-async def update_salary(player_id: int, req: SalaryUpdate):
-    """Update salary fields for a player. Invalidates the in-memory cache."""
-    if not db.db_exists():
-        raise HTTPException(503, "Database not seeded yet.")
-    updated = db.update_player_salary(
-        player_id,
-        req.salary,
-        req.salary_year2,
-        req.salary_year3,
-        req.salary_year4,
-    )
-    if not updated:
-        raise HTTPException(404, f"Player {player_id} not found")
-    service._cached_at = None
-    return {"message": "Salary updated", "player_id": player_id, "salary": req.salary}
-
-
-class CapHitUpdate(BaseModel):
-    cap_hit: Optional[float] = None
-
-
-@app.patch("/api/db/players/{player_id}/cap-hit")
-async def update_cap_hit(player_id: int, req: CapHitUpdate):
-    """Set or clear a manual cap-hit override for a player."""
-    if not db.db_exists():
-        raise HTTPException(503, "Database not seeded yet.")
-    db.init_db()  # ensure migration columns exist
-    updated = db.update_player_cap_hit(player_id, req.cap_hit)
-    if not updated:
-        raise HTTPException(404, f"Player {player_id} not found")
-    service._cached_at = None
-    return {
-        "message": "Cap hit updated" if req.cap_hit is not None else "Cap hit override cleared",
-        "player_id": player_id,
-        "cap_hit": req.cap_hit,
-    }
-
-
-@app.post("/api/db/players", status_code=201)
-async def create_player(req: PlayerCreate):
-    """Manually add a player (two-way / G League / missing players)."""
-    player = {
-        "full_name":    req.full_name,
-        "norm_name":    data_client._normalize_name(req.full_name),
-        "team_abbr":    req.team_abbr.upper(),
-        "pos":          req.pos or "",
-        "age":          req.age or 0,
-        "salary":       req.salary or 0,
-        "salary_year2": req.salary_year2 or 0,
-        "salary_year3": req.salary_year3 or 0,
-        "salary_year4": req.salary_year4 or 0,
-    }
-    db.init_db()
-    new_id = db.insert_player(player)
-    service._cached_at = None
-    return {"message": "Player created", "player_id": new_id}
-
-
-@app.delete("/api/db/players/{player_id}")
-async def delete_player(player_id: int):
-    """Remove a player from the DB."""
-    if not db.db_exists():
-        raise HTTPException(503, "Database not seeded yet.")
-    deleted = db.delete_player(player_id)
-    if not deleted:
-        raise HTTPException(404, f"Player {player_id} not found")
-    service._cached_at = None
-    return {"message": "Player deleted", "player_id": player_id}

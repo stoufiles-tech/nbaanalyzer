@@ -2,20 +2,13 @@ import axios from "axios";
 
 const BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
 
-export interface DataQuality {
-  salary_source: string;
-  salary_type: string;
-  known_gaps: string[];
-  cap_hit_override_available: boolean;
-}
-
 export interface CapConstants {
   season: string;
   salary_cap: number;
   luxury_tax_threshold: number;
   first_apron: number;
   second_apron: number;
-  data_quality?: DataQuality;
+  data_as_of?: string;
 }
 
 export interface Player {
@@ -56,11 +49,30 @@ export interface Player {
   dws: number;
 }
 
+export interface TradePick {
+  year: number;
+  round: number;
+  original_team: string;
+}
+
 export interface TradeRequest {
   team_a_id: string;
   team_b_id: string;
   players_a: string[];
   players_b: string[];
+  picks_a?: TradePick[];
+  picks_b?: TradePick[];
+}
+
+export interface TradeValidityResult {
+  team_a_salary_valid: boolean;
+  team_a_rule: string;
+  team_a_warnings: string[];
+  team_b_salary_valid: boolean;
+  team_b_rule: string;
+  team_b_warnings: string[];
+  ntc_warnings: string[];
+  is_valid: boolean;
 }
 
 export interface TradeResult {
@@ -71,6 +83,33 @@ export interface TradeResult {
   team_a_delta: number;
   team_b_delta: number;
   analysis: string;
+  validity?: TradeValidityResult;
+  picks_a_value?: number;
+  picks_b_value?: number;
+}
+
+export interface DraftPickDetail {
+  owner: string;
+  year: number;
+  round: number;
+  original_team: string;
+  protections: string;
+  swap_rights: boolean;
+  via_trade: string;
+  notes: string;
+  label: string;
+  estimated_value: number;
+}
+
+export interface DraftCapitalSummary {
+  team: string;
+  total_picks: number;
+  first_round: number;
+  second_round: number;
+  own_picks: number;
+  acquired_picks: number;
+  total_estimated_value: number;
+  picks: DraftPickDetail[];
 }
 
 export interface Team {
@@ -213,6 +252,106 @@ export interface ComparablesResult {
   comp_count: number;
 }
 
+// ── Roster Advisor ──────────────────────────────────────────────────────────
+
+export interface PositionalNeed {
+  position: string;
+  team_bpm: number;
+  league_avg_bpm: number;
+  gap: number;
+  priority: "HIGH" | "MED" | "LOW";
+  player_count: number;
+}
+
+export interface FitBreakdown {
+  need_bonus: number;
+  value_efficiency: number;
+  age_curve: number;
+  cap_feasibility: number;
+  mutual_need: number;
+}
+
+export interface TradeValidity {
+  valid: boolean;
+  rule_used: string;
+  max_incoming: number;
+  warnings: string[];
+}
+
+export interface FitScoredPlayer {
+  full_name: string;
+  team_abbr: string;
+  team_name: string;
+  position: string;
+  age: number;
+  salary: number;
+  salary_year2: number;
+  points: number;
+  rebounds: number;
+  assists: number;
+  bpm: number;
+  vorp: number;
+  ws: number;
+  value_score: number;
+  fit_score: number;
+  fit_breakdown: FitBreakdown;
+  trade_validity?: TradeValidity;
+  availability?: string;
+  availability_reason?: string;
+  has_ntc?: boolean;
+  source_team_context?: string;
+  source_team_needs?: string[];
+  mutual_need_score?: number;
+}
+
+export interface BiggestContract {
+  full_name: string;
+  salary: number;
+}
+
+export interface CapOutlookYear {
+  season: string;
+  committed_salary: number;
+  projected_cap: number;
+  projected_space: number;
+  committed_players: number;
+  biggest_contracts: BiggestContract[];
+}
+
+export interface RosterAnalysis {
+  cap_space: number;
+  total_salary: number;
+  tax_bill: number;
+  over_luxury_tax: boolean;
+  over_first_apron: boolean;
+  over_second_apron: boolean;
+  is_taxpayer: boolean;
+  expiring_count: number;
+  expiring_salary: number;
+  positional_needs: PositionalNeed[];
+  biggest_contracts: {
+    full_name: string;
+    position: string;
+    salary: number;
+    salary_year2: number;
+    salary_year3: number;
+    years_remaining: number;
+  }[];
+}
+
+export interface AdvisorResult {
+  team_id: string;
+  team_name: string;
+  abbreviation: string;
+  team_context?: string;
+  roster_analysis: RosterAnalysis;
+  fa_targets: FitScoredPlayer[];
+  trade_targets: FitScoredPlayer[];
+  cap_outlook: CapOutlookYear[];
+  ai_summary: string | null;
+  draft_capital?: DraftCapitalSummary;
+}
+
 export const api = {
   getCapConstants: () =>
     axios.get<CapConstants>(`${BASE}/cap-constants`).then((r) => r.data),
@@ -225,6 +364,9 @@ export const api = {
 
   getTeamHistory: (teamId: string) =>
     axios.get<TeamHistoryResult>(`${BASE}/teams/${teamId}/history`).then((r) => r.data),
+
+  getAllPlayers: () =>
+    axios.get<Player[]>(`${BASE}/players/all`).then((r) => r.data),
 
   getTopValuePlayers: (limit = 20) =>
     axios.get<Player[]>(`${BASE}/players/top-value?limit=${limit}`).then((r) => r.data),
@@ -250,4 +392,10 @@ export const api = {
         `${BASE}/players/${encodeURIComponent(playerName)}/comparables?limit=${limit}`
       )
       .then((r) => r.data),
+
+  getTeamAdvisor: (teamId: string) =>
+    axios.get<AdvisorResult>(`${BASE}/teams/${teamId}/advisor`).then((r) => r.data),
+
+  getTeamDraftPicks: (teamId: string) =>
+    axios.get<DraftCapitalSummary>(`${BASE}/teams/${teamId}/draft-picks`).then((r) => r.data),
 };

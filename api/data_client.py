@@ -1,39 +1,19 @@
 """
-Multi-source NBA data client (pure urllib + stdlib — no pandas).
+Static NBA data client — loads from data/nba_2025_26.json.
 
-Data source priority:
-  1. api/nba.db  (SQLite — populated by scripts/fetch_and_seed.py run locally)
-  2. Basketball-Reference live scrape (fallback when DB not present)
+No scraping, no database, no network calls. All data is compiled
+from Spotrac cap hits and Basketball-Reference stats.
 """
 import re
 import json
-import ssl
-import gzip
-import urllib.request
-import urllib.error
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import os
 
-SEASON = "2025-26"
+_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "nba_2025_26.json",
+)
 
-SALARY_CAP           = 154_647_000
-LUXURY_TAX_THRESHOLD = 187_931_000
-FIRST_APRON          = 195_000_000
-SECOND_APRON         = 207_000_000
-
-_executor = ThreadPoolExecutor(max_workers=4)
-
-_ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
-
-BBREF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
+_cached_data: dict | None = None
 
 ESPN_LOGO_ABBR = {
     "ATL": "atl", "BOS": "bos", "BKN": "bkn", "CHA": "cha", "CHI": "chi",
@@ -93,7 +73,6 @@ ESPN_ID = {
 
 ESPN_ID_TO_ABBR = {v: k for k, v in ESPN_ID.items()}
 
-# nba.com team IDs used by nba_api
 NBA_TEAM_ID = {
     "ATL": 1610612737, "BOS": 1610612738, "BKN": 1610612751, "CHA": 1610612766,
     "CHI": 1610612741, "CLE": 1610612739, "DAL": 1610612742, "DEN": 1610612743,
@@ -121,6 +100,13 @@ BBREF_NAME_TO_ABBR = {
     "Washington Wizards": "WAS",
 }
 
+SEASON = "2025-26"
+
+SALARY_CAP           = 154_647_000
+LUXURY_TAX_THRESHOLD = 187_931_000
+FIRST_APRON          = 195_000_000
+SECOND_APRON         = 207_000_000
+
 
 def _normalize_name(name: str) -> str:
     name = name.lower().strip()
@@ -128,227 +114,33 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", name)
 
 
-def _fetch_html(url: str, headers: dict, timeout: int = 25) -> str:
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, context=_ssl_ctx, timeout=timeout) as r:
-        raw = r.read()
-    if r.headers.get("Content-Encoding") == "gzip":
-        raw = gzip.decompress(raw)
-    return raw.decode("utf-8", errors="replace")
-
-
-def _gstat(row: str, stat: str) -> float:
-    m = re.search(r'data-stat="' + stat + r'"[^>]*csk="([\d.+-]+)"', row)
-    if m:
-        try:
-            return float(m.group(1))
-        except ValueError:
-            pass
-    m = re.search(r'data-stat="' + stat + r'"[^>]*>([\d.+-]+)', row)
-    try:
-        return float(m.group(1)) if m else 0.0
-    except ValueError:
-        return 0.0
-
-
-def _fetch_bbref_player_stats_sync() -> list[dict]:
-    url = "https://www.basketball-reference.com/leagues/NBA_2026_per_game.html"
-    html = _fetch_html(url, BBREF_HEADERS, timeout=25)
-    players: list[dict] = []
-    seen: set[str] = set()
-
-    for m in re.finditer(r"<tr\b([^>]*)>(.*?)</tr>", html, re.DOTALL):
-        content = m.group(2)
-        if 'name_display' not in content or 'pts_per_g' not in content:
-            continue
-        name_m = re.search(r'data-stat="name_display"[^>]*>.*?href="[^"]+">([^<]+)</a>', content, re.DOTALL)
-        team_m = re.search(r'data-stat="team_name_abbr"[^>]*>(?:<a[^>]*>)?([A-Z0-9]+)', content, re.DOTALL)
-        if not name_m:
-            continue
-        name = name_m.group(1).strip()
-        team_raw = team_m.group(1).strip() if team_m else ""
-        team = BBREF_TEAM_MAP.get(team_raw, team_raw)
-        if team_raw in ("TOT", "2TM", "3TM", "4TM", "5TM") or name in seen:
-            continue
-        seen.add(name)
-
-        pos_m = re.search(r'data-stat="pos"[^>]*>([^<]*)', content)
-        pos = pos_m.group(1).strip() if pos_m else ""
-
-        players.append({
-            "nba_id":          name,
-            "full_name":       name,
-            "team_abbr":       team,
-            "pos":             pos,
-            "age":             _gstat(content, "age"),
-            "games_played":    int(_gstat(content, "games") or 0),
-            "minutes":         _gstat(content, "mp_per_g"),
-            "points":          _gstat(content, "pts_per_g"),
-            "rebounds":        _gstat(content, "trb_per_g"),
-            "assists":         _gstat(content, "ast_per_g"),
-            "steals":          _gstat(content, "stl_per_g"),
-            "blocks":          _gstat(content, "blk_per_g"),
-            "fga":             _gstat(content, "fga_per_g"),
-            "fta":             _gstat(content, "fta_per_g"),
-            "field_goal_pct":  _gstat(content, "fg_pct"),
-            "three_point_pct": _gstat(content, "fg3_pct"),
-            "free_throw_pct":  _gstat(content, "ft_pct"),
-            "tov_per_g":       _gstat(content, "tov_per_g"),
-        })
-
-    return players
-
-
-def _fetch_bbref_contracts_sync() -> list[dict]:
-    url = "https://www.basketball-reference.com/contracts/players.html"
-    html = _fetch_html(url, BBREF_HEADERS, timeout=25)
-    players: list[dict] = []
-
-    for m in re.finditer(r"<tr\b([^>]*)>(.*?)</tr>", html, re.DOTALL):
-        content = m.group(2)
-        name_m = re.search(r'data-stat="player"[^>]*>.*?<a[^>]*>([^<]+)</a>', content, re.DOTALL)
-        team_m = re.search(r'data-stat="team_id"[^>]*>(?:<a[^>]*>)?([A-Z0-9]+)', content, re.DOTALL)
-        sal_m  = re.search(r'data-stat="y1"[^>]*csk="(\d+)"', content)
-        if not (name_m and sal_m):
-            continue
-        name   = name_m.group(1).strip()
-        raw_tm = team_m.group(1).strip() if team_m else ""
-        team   = BBREF_TEAM_MAP.get(raw_tm, raw_tm)
-        salary = float(sal_m.group(1))
-        if salary <= 0:
-            continue
-
-        def _yr(stat: str) -> float:
-            mm = re.search(r'data-stat="' + stat + r'"[^>]*csk="(\d+)"', content)
-            return float(mm.group(1)) if mm else 0.0
-
-        players.append({
-            "full_name":    name,
-            "norm_name":    _normalize_name(name),
-            "team_abbr":    team,
-            "salary":       salary,
-            "salary_year2": _yr("y2"),
-            "salary_year3": _yr("y3"),
-            "salary_year4": _yr("y4"),
-        })
-
-    return players
-
-
-def _fetch_bbref_standings_sync() -> list[dict]:
-    url = "https://www.basketball-reference.com/leagues/NBA_2026_standings.html"
-    html = _fetch_html(url, BBREF_HEADERS, timeout=20)
-    teams: list[dict] = []
-    seen: set[str] = set()
-
-    for m in re.finditer(r"<tr\b([^>]*)>(.*?)</tr>", html, re.DOTALL):
-        content = m.group(2)
-        team_m = re.search(r'data-stat="team_name"[^>]*>.*?href="[^"]+">([^<]+)</a>', content, re.DOTALL)
-        w_m = re.search(r'data-stat="wins"[^>]*>(\d+)', content)
-        l_m = re.search(r'data-stat="losses"[^>]*>(\d+)', content)
-        if not (team_m and w_m and l_m):
-            continue
-        full_name = team_m.group(1).strip()
-        if full_name in seen:
-            continue
-        seen.add(full_name)
-        abbr = BBREF_NAME_TO_ABBR.get(full_name, "")
-        if not abbr:
-            continue
-        wins   = int(w_m.group(1))
-        losses = int(l_m.group(1))
-        logo_key = ESPN_LOGO_ABBR.get(abbr, abbr.lower())
-        logo = f"https://a.espncdn.com/i/teamlogos/nba/500/{logo_key}.png"
-        loc, disp = TEAM_FULL.get(abbr, (abbr, full_name))
-        teams.append({
-            "espn_id":      ESPN_ID.get(abbr, abbr),
-            "abbreviation": abbr,
-            "display_name": disp,
-            "location":     loc,
-            "nickname":     disp.replace(loc, "").strip(),
-            "logo_url":     logo,
-            "wins":         wins,
-            "losses":       losses,
-        })
-
-    return teams
-
-
-def _fetch_bbref_advanced_sync() -> dict[str, dict]:
-    url = "https://www.basketball-reference.com/leagues/NBA_2026_advanced.html"
-    html = _fetch_html(url, BBREF_HEADERS, timeout=25)
-    result: dict[str, dict] = {}
-
-    for m in re.finditer(r"<tr\b([^>]*)>(.*?)</tr>", html, re.DOTALL):
-        content = m.group(2)
-        if 'name_display' not in content or 'per' not in content:
-            continue
-        name_m = re.search(r'data-stat="name_display"[^>]*>.*?href="[^"]+">([^<]+)</a>', content, re.DOTALL)
-        team_m = re.search(r'data-stat="team_name_abbr"[^>]*>(?:<a[^>]*>)?([A-Z0-9]+)', content, re.DOTALL)
-        if not name_m:
-            continue
-        name = name_m.group(1).strip()
-        team_raw = team_m.group(1).strip() if team_m else ""
-        if team_raw in ("TOT", "2TM", "3TM", "4TM", "5TM"):
-            continue
-        norm = _normalize_name(name)
-        if norm in result:
-            continue
-        result[norm] = {
-            "per":       _gstat(content, "per"),
-            "usg_pct":   _gstat(content, "usg_pct"),
-            "ws":        _gstat(content, "ws"),
-            "ws_per_48": _gstat(content, "ws_per_48"),
-            "bpm":       _gstat(content, "bpm"),
-            "obpm":      _gstat(content, "obpm"),
-            "dbpm":      _gstat(content, "dbpm"),
-            "vorp":      _gstat(content, "vorp"),
-            "ows":       _gstat(content, "ows"),
-            "dws":       _gstat(content, "dws"),
-        }
-
-    return result
+def _load_json() -> dict:
+    global _cached_data
+    if _cached_data is not None:
+        return _cached_data
+    with open(_DATA_PATH, "r", encoding="utf-8") as f:
+        _cached_data = json.load(f)
+    return _cached_data
 
 
 async def fetch_all_data() -> tuple[list[dict], list[dict], list[dict], dict[str, dict]]:
     """
-    Returns (teams, per_game_stats, contracts, advanced_stats).
-
-    If api/nba.db exists, reads from it directly (fast, no network calls).
-    Otherwise falls back to live Basketball-Reference scraping.
+    Returns (teams, per_game_stats, contracts, advanced_stats)
+    from the static JSON file. Same tuple shape as the old scraper.
     """
-    try:
-        import db as _db
-        if _db.db_exists():
-            return _load_from_db(_db)
-    except Exception:
-        pass  # DB module or file unavailable — fall through to scraping
+    data = _load_json()
 
-    # ── Live BBRef scrape (fallback) ─────────────────────────────────────────
-    loop = asyncio.get_event_loop()
-    teams, stats, contracts, advanced = await asyncio.gather(
-        loop.run_in_executor(_executor, _fetch_bbref_standings_sync),
-        loop.run_in_executor(_executor, _fetch_bbref_player_stats_sync),
-        loop.run_in_executor(_executor, _fetch_bbref_contracts_sync),
-        loop.run_in_executor(_executor, _fetch_bbref_advanced_sync),
-    )
-    return teams, stats, contracts, advanced
+    teams = data["teams"]
 
-
-def _load_from_db(_db) -> tuple[list[dict], list[dict], list[dict], dict[str, dict]]:
-    """
-    Convert SQLite rows into the same shape that the BBRef scrapers return
-    so that service.py / merge_player_data() need zero changes.
-    """
-    teams = _db.load_teams()  # already in the right shape
-
-    db_players = _db.load_players()
-
-    # Build per-game stats list (same shape as _fetch_bbref_player_stats_sync)
     stats: list[dict] = []
-    for p in db_players:
+    contracts: list[dict] = []
+    advanced: dict[str, dict] = {}
+
+    for p in data["players"]:
+        norm = p.get("norm_name") or _normalize_name(p["full_name"])
+
         stats.append({
-            "nba_id":          str(p.get("id", "")),
+            "nba_id":          p["full_name"],
             "full_name":       p["full_name"],
             "team_abbr":       p["team_abbr"],
             "pos":             p.get("pos", ""),
@@ -367,15 +159,11 @@ def _load_from_db(_db) -> tuple[list[dict], list[dict], list[dict], dict[str, di
             "free_throw_pct":  p.get("free_throw_pct", 0),
             "tov_per_g":       p.get("tov_per_g", 0),
             "cap_hit":         p.get("cap_hit"),
-            "salary_source":   p.get("salary_source", "bbref"),
         })
 
-    # Build contracts list (same shape as _fetch_bbref_contracts_sync)
-    contracts: list[dict] = []
-    for p in db_players:
         contracts.append({
             "full_name":    p["full_name"],
-            "norm_name":    p.get("norm_name", _normalize_name(p["full_name"])),
+            "norm_name":    norm,
             "team_abbr":    p["team_abbr"],
             "salary":       p.get("salary", 0),
             "salary_year2": p.get("salary_year2", 0),
@@ -383,10 +171,6 @@ def _load_from_db(_db) -> tuple[list[dict], list[dict], list[dict], dict[str, di
             "salary_year4": p.get("salary_year4", 0),
         })
 
-    # Build advanced stats dict keyed by norm_name
-    advanced: dict[str, dict] = {}
-    for p in db_players:
-        norm = p.get("norm_name") or _normalize_name(p["full_name"])
         advanced[norm] = {
             "per":       p.get("per", 0),
             "usg_pct":   p.get("usg_pct", 0),
@@ -452,7 +236,6 @@ def merge_player_data(
             "salary_year3":    contract["salary_year3"],
             "salary_year4":    contract["salary_year4"],
             "cap_hit":         None,
-            "salary_source":   "bbref",
             **_adv_for(norm),
         }
 
@@ -493,21 +276,13 @@ def merge_player_data(
 
 
 def get_cap_constants() -> dict:
+    data = _load_json()
+    meta = data["meta"]
     return {
-        "season":               SEASON,
-        "salary_cap":           SALARY_CAP,
-        "luxury_tax_threshold": LUXURY_TAX_THRESHOLD,
-        "first_apron":          FIRST_APRON,
-        "second_apron":         SECOND_APRON,
-        "data_quality": {
-            "salary_source": "Basketball-Reference",
-            "salary_type": "base_salary",
-            "known_gaps": [
-                "Salaries are base salary only — not official cap hits.",
-                "Trade bonuses, likely/unlikely incentives, and structured deal adjustments are not reflected.",
-                "Two-way and Exhibit 10 contracts may be missing or approximate.",
-                "Mid-season trades may show stale team assignments until next data refresh.",
-            ],
-            "cap_hit_override_available": True,
-        },
+        "season":               meta["season"],
+        "salary_cap":           meta["salary_cap"],
+        "luxury_tax_threshold": meta["luxury_tax_threshold"],
+        "first_apron":          meta["first_apron"],
+        "second_apron":         meta["second_apron"],
+        "data_as_of":           meta.get("data_as_of", ""),
     }

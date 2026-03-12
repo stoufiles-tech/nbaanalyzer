@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api";
 import type { ComparablesResult, ComparablePlayer } from "../api";
 import { fmtSalary } from "../utils";
@@ -27,11 +27,23 @@ const SUGGESTIONS = [
   "Karl-Anthony Towns",
 ];
 
-export default function PlayerComparables() {
+interface Props {
+  initialPlayer?: string | null;
+}
+
+export default function PlayerComparables({ initialPlayer }: Props) {
   const [query, setQuery]     = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState<ComparablesResult | null>(null);
   const [error, setError]     = useState("");
+
+  const lastInitial = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (initialPlayer && initialPlayer !== lastInitial.current) {
+      lastInitial.current = initialPlayer;
+      search(initialPlayer);
+    }
+  }, [initialPlayer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const search = async (name?: string) => {
     const q = (name ?? query).trim();
